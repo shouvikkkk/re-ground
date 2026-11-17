@@ -20,7 +20,7 @@ https://malware.news/t/building-an-adversarial-consensus-engine-multi-agent-llms
 
 https://sh3llc0d3.com/blog/a3-ai-analysis-evasion-cisco-talos-dissects-malware-authors-embedding-adversarial-prompt-injections-in-pe-headers-to-gaslight-security-llms/
 
-re-ground sits between the agent and your trust: it re-derives every claimed address, string, import, endpoint, and section from the binary itself, and it flags the traps before you read the report.
+re-ground sits between the agent and your trust: it re-derives every claimed address, string, import, endpoint, and section from the binary itself, checks claimed capabilities against the conjunction of evidence behind them, and it flags the traps before you read the report.
 
 ## Quick start
 
@@ -49,10 +49,16 @@ An agent report is JSON:
     {"id": "c2", "type": "string",  "value": "http://c2.example/beacon"},
     {"id": "c3", "type": "import",  "value": "KERNEL32.dll!CreateFileW"},
     {"id": "c4", "type": "endpoint","value": "http://c2.example/beacon"},
-    {"id": "c5", "type": "section", "value": ".text"}
+    {"id": "c5", "type": "section", "value": ".text"},
+    {"id": "c6", "type": "capability", "value": "establishes a C2 channel",
+     "evidence": [{"type": "symbol", "value": "connect"},
+                  {"type": "string", "value": "http://c2.example/beacon"},
+                  {"type": "import", "value": "socket"}]}
   ]
 }
 ```
+
+A capability is not proved by its name: it needs a conjunction of evidence items, each of type `symbol`, `string`, `import`, `address`, or `section`, checked with the same rules as the single-claim types. That is the whole point — the malware.news case was an agent reporting dead library code as a live capability, and one matching string is not enough to make a capability real.
 
 | type | value | grounded when |
 |---|---|---|
@@ -61,6 +67,7 @@ An agent report is JSON:
 | `import` | `func`, `dll!func`, or `libname` | exact import (ELF undefined dynsym / PE import table) or DT_NEEDED lib |
 | `endpoint` | URL/hostname the agent claims | exact string present in the binary |
 | `section` | section name | section exists |
+| `capability` | capability name + `evidence` list | **every** evidence item checks out (see Verdicts for the rest) |
 
 ## Verdicts
 
@@ -68,7 +75,8 @@ Not a boolean — agents usually misread rather than invent:
 
 - **GROUNDED** — exact match in the binary.
 - **MANGLED** — close match with corruption, and here is the real value: an address a few bytes past the end of `.text`, a C2 URL with one extra character (the malware.news case), an import off by one letter, a section name with a typo. Deterministic edit-distance and boundary checks, no ML.
-- **UNGROUNDED** — no trace anywhere in the binary. The "capability" was imagined.
+- **PARTIAL** — capability claims only: some evidence items confirmed, some missing. The classic dead-code case — the function exists in the symbol table and the C2 string exists, but the import that would make the capability live does not. A half-supported capability is not a grounded one.
+- **UNGROUNDED** — no trace anywhere in the binary. The claim was imagined.
 - **UNSUPPORTED** — cannot be checked (e.g. packed binary with no sections or segments). Reported honestly instead of guessing.
 
 ```
@@ -82,7 +90,11 @@ $ python -m reground audit --binary fixtures/demo.elf --report fixtures/sample-r
 [UNGROUNDED] dead-addr (address) 0x900000
          address is not inside any section or segment and is far from every mapped boundary
 ...
-8 claims: 3 grounded, 2 mangled, 3 ungrounded, 0 unsupported
+[PARTIAL] c2-capability (capability) establishes a C2 channel
+         2 of 3 evidence items confirmed; missing: import 'socket'
+         evidence: symbol 'helper': grounded (symbol 'helper' at 0x401010); string 'http://c2.evil.example/beacon': grounded (ascii, vaddr 0x402000); import 'socket': ungrounded
+...
+9 claims: 3 grounded, 1 partial, 2 mangled, 3 ungrounded, 0 unsupported
 ```
 
 ## Trap scanning
@@ -100,6 +112,7 @@ $ python -m reground audit --binary fixtures/demo.elf --report fixtures/sample-r
 - **Static only.** No decompilation, no emulation, no dynamic analysis. A claim about runtime behavior ("decrypts the payload at runtime") is out of scope.
 - **Packed/obfuscated binaries** degrade gracefully to `UNSUPPORTED` instead of guessing — but that means re-ground can't help where you need it most until unpacking happens upstream.
 - **String matching is approximate by nature.** Byte-level extraction has known ambiguities (e.g. ASCII-range UTF-16 reads as both LE at N and BE at N-1; adjacent strings can bleed into one scan run). The `MANGLED` verdict exists precisely because extraction is lossy — treat near-matches as leads, not proof.
+- **No call-graph or cross-reference evidence yet.** A capability claim can require a symbol, strings, imports, an address, and a section — but not proof that the function is actually *called* (that needs relocation/xref analysis, a future extension). A symbol that exists but is never called still counts as present evidence; the conjunction is what catches most dead-code cases, not a call graph.
 - **The trap patterns are a starting table, not a feed.** New prompt-injection phrasings appear constantly; the table needs curating.
 - **No archive support.** One binary per run; unpack containers yourself first.
 
@@ -114,12 +127,13 @@ reground/
   stringsx.py   ASCII / UTF-16LE / UTF-16BE string extraction with vaddrs
   claims.py     report JSON schema, validation with helpful errors
   verify.py     deterministic verification engine (GROUNDED/MANGLED/
-                UNGROUNDED/UNSUPPORTED)
+                PARTIAL/UNGROUNDED/UNSUPPORTED), capability conjunctions
   traps.py      anti-AI payload detector (Talos A3 taxonomy + flooding heuristics)
   cli.py        `reground audit` / `reground traps` (text + json output)
-tests/          104 tests, all offline: byte-built ELF64/ELF32/PE fixtures,
+tests/          125 tests, all offline: byte-built ELF64/ELF32/PE fixtures,
                 an integration test against /bin/ls when present
 fixtures/       sample-report.json -- an agent report with planted bad claims
+CHANGELOG.md    version history
 ```
 
 ## License
