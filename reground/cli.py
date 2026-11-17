@@ -21,9 +21,11 @@ def _print_audit_text(binary, verdicts, summary):
         if v.evidence:
             print("         evidence: %s" % v.evidence)
     print("-" * 60)
-    print("%d claims: %d grounded, %d mangled, %d ungrounded, %d unsupported"
-          % (summary["total"], summary["GROUNDED"], summary["MANGLED"],
-             summary["UNGROUNDED"], summary["UNSUPPORTED"]))
+    print("%d claims: %d grounded, %d partial, %d mangled, %d ungrounded, "
+          "%d unsupported"
+          % (summary["total"], summary["GROUNDED"], summary["PARTIAL"],
+             summary["MANGLED"], summary["UNGROUNDED"],
+             summary["UNSUPPORTED"]))
 
 
 def _print_audit_json(binary, verdicts, summary):
