@@ -5,6 +5,10 @@ Verdicts (deterministic, no ML):
   MANGLED     -- close match with corruption (address just outside a section,
                  string/endpoint/import/section name off by a char or two --
                  the classic "agent misread the bytes" failure)
+  PARTIAL     -- capability claims only: some evidence items confirmed, some
+                 missing. The classic dead-code case: the function exists in
+                 the symbol table, but the strings and imports that would
+                 make the capability live do not.
   UNGROUNDED  -- no trace of the claim anywhere in the binary
   UNSUPPORTED -- the claim cannot be checked (e.g. packed binary with no
                  sections or segments, so there is nothing to map against)
@@ -18,10 +22,11 @@ reported as "mangled, here is the real value" than as a flat rejection.
 from . import elf as elf_mod
 from . import pe as pe_mod
 from . import stringsx
-from .claims import parse_address
+from .claims import Claim, parse_address
 
 GROUNDED = "GROUNDED"
 MANGLED = "MANGLED"
+PARTIAL = "PARTIAL"
 UNGROUNDED = "UNGROUNDED"
 UNSUPPORTED = "UNSUPPORTED"
 
@@ -103,7 +108,6 @@ def _closest(candidates, target, max_dist):
     if best is None:
         return None, None
     return best, best_dist
-
 
 class BinaryView:
     """Format-agnostic view of a binary for claim checking."""
@@ -207,6 +211,7 @@ class Auditor:
             "import": self._check_import,
             "endpoint": self._check_endpoint,
             "section": self._check_section,
+            "capability": self._check_capability,
         }
 
     def audit(self, report):
@@ -254,7 +259,6 @@ class Auditor:
         return Verdict(claim.id, claim.type, claim.value, UNGROUNDED,
                        "address is not inside any section or segment and is "
                        "far from every mapped boundary")
-
     # -- string -------------------------------------------------------
     def _check_string(self, claim):
         view = self.view
@@ -364,6 +368,105 @@ class Auditor:
                 evidence="closest real section: %r" % best)
         return Verdict(claim.id, claim.type, claim.value, UNGROUNDED,
                        "no such section in the binary")
+    # -- symbol (capability evidence only) ------------------------------
+    def _check_symbol(self, claim):
+        view = self.view
+        target = claim.value
+        if target in view.symbols:
+            return Verdict(claim.id, claim.type, claim.value, GROUNDED,
+                           "symbol present in the binary",
+                           evidence="symbol '%s' at %#x"
+                                    % (target, view.symbols[target]))
+        best, dist = _closest(list(view.symbols), target,
+                              MANGLE_EDIT_DISTANCE)
+        if best is not None:
+            return Verdict(
+                claim.id, claim.type, claim.value, MANGLED,
+                "no such symbol, but edit distance %d from real symbol %r "
+                "-- likely a misread symbol name" % (dist, best),
+                evidence="closest real symbol: %r" % best)
+        return Verdict(claim.id, claim.type, claim.value, UNGROUNDED,
+                       "no such symbol in the binary")
+
+    # -- capability -----------------------------------------------------
+    def _check_capability(self, claim):
+        # A capability is proved by a conjunction: every evidence item must
+        # check out on its own. One item alone proves nothing -- that is
+        # exactly how dead library code ends up reported as a live
+        # capability. Each item reuses the single-claim checker of its type,
+        # so near-miss (MANGLED) evidence still surfaces the real value.
+        view = self.view
+        if not view.verifiable and not view.string_values:
+            return Verdict(claim.id, claim.type, claim.value, UNSUPPORTED,
+                           "binary exposes nothing to check evidence "
+                           "against; capability claims cannot be checked")
+        item_checkers = {
+            "symbol": self._check_symbol,
+            "string": self._check_string,
+            "import": self._check_import,
+            "address": self._check_address,
+            "section": self._check_section,
+        }
+        results = []  # [(etype, value, sub-verdict)]
+        for idx, (etype, evalue) in enumerate(claim.evidence):
+            sub = item_checkers[etype](
+                Claim("ev%d" % idx, etype, evalue))
+            results.append((etype, evalue, sub))
+        grounded = [r for r in results if r[2].verdict == GROUNDED]
+        mangled = [r for r in results if r[2].verdict == MANGLED]
+        unchecked = [r for r in results if r[2].verdict == UNSUPPORTED]
+        missing = [r for r in results
+                   if r[2].verdict in (UNGROUNDED, MANGLED)]
+        total = len(results)
+
+        def _label(result):
+            etype, evalue, sub = result
+            text = "%s %r: %s" % (etype, evalue, sub.verdict.lower())
+            if sub.verdict in (GROUNDED, MANGLED) and sub.evidence:
+                # Keep the why: the address a symbol lives at, the vaddr
+                # a string was found at, the closest real value on a
+                # near-miss -- that is the evidence a triage reader needs.
+                text += " (%s)" % sub.evidence
+            return text
+
+        evidence = "; ".join(_label(r) for r in results)
+        if len(grounded) == total:
+            return Verdict(claim.id, claim.type, claim.value, GROUNDED,
+                           "all %d evidence items confirmed in the binary"
+                           % total,
+                           evidence=evidence)
+        if not grounded and not mangled and unchecked and \
+                len(unchecked) == total:
+            return Verdict(claim.id, claim.type, claim.value, UNSUPPORTED,
+                           "no evidence item could be checked against this "
+                           "binary",
+                           evidence=evidence)
+        if not grounded and mangled:
+            first = mangled[0][2]
+            return Verdict(
+                claim.id, claim.type, claim.value, MANGLED,
+                "no evidence item confirmed, but %s -- likely a misread "
+                "of the real evidence" % first.detail,
+                evidence=evidence)
+        if not grounded:
+            detail = ("none of the %d evidence items found in the binary"
+                      % total)
+            if unchecked:
+                detail += ("; %d item(s) could not be checked: %s"
+                           % (len(unchecked),
+                              ", ".join("%s %r" % (r[0], r[1])
+                                       for r in unchecked)))
+            return Verdict(claim.id, claim.type, claim.value, UNGROUNDED,
+                           detail, evidence=evidence)
+        detail = ("%d of %d evidence items confirmed; missing: %s"
+                  % (len(grounded), total,
+                     ", ".join("%s %r" % (r[0], r[1]) for r in missing)))
+        if unchecked:
+            detail += ("; could not be checked: %s"
+                       % ", ".join("%s %r" % (r[0], r[1])
+                                   for r in unchecked))
+        return Verdict(claim.id, claim.type, claim.value, PARTIAL, detail,
+                       evidence=evidence)
 
 
 def audit_binary(binary_path, report):
@@ -371,7 +474,7 @@ def audit_binary(binary_path, report):
     view = _load_binary(binary_path)
     verdicts = Auditor(view).audit(report)
     summary = {"total": len(verdicts), GROUNDED: 0, MANGLED: 0,
-               UNGROUNDED: 0, UNSUPPORTED: 0}
+               PARTIAL: 0, UNGROUNDED: 0, UNSUPPORTED: 0}
     for v in verdicts:
         summary[v.verdict] += 1
     return verdicts, summary
