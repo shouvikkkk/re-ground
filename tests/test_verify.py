@@ -69,7 +69,7 @@ class ELFAudit(unittest.TestCase):
     def test_grounded_endpoint(self):
         verdicts, _ = self._audit(
             [_claim("e", "endpoint", "http://c2.evil.example/beacon")])
-        self.assertEqual(v.verdict, GROUNDED)
+        self.assertEqual(verdicts["e"].verdict, GROUNDED)
 
     def test_grounded_section(self):
         verdicts, _ = self._audit([_claim("t", "section", ".text")])
