@@ -108,6 +108,7 @@ def _closest(candidates, target, max_dist):
     if best is None:
         return None, None
     return best, best_dist
+  
 
 class BinaryView:
     """Format-agnostic view of a binary for claim checking."""
@@ -259,6 +260,7 @@ class Auditor:
         return Verdict(claim.id, claim.type, claim.value, UNGROUNDED,
                        "address is not inside any section or segment and is "
                        "far from every mapped boundary")
+      
     # -- string -------------------------------------------------------
     def _check_string(self, claim):
         view = self.view
@@ -368,6 +370,7 @@ class Auditor:
                 evidence="closest real section: %r" % best)
         return Verdict(claim.id, claim.type, claim.value, UNGROUNDED,
                        "no such section in the binary")
+      
     # -- symbol (capability evidence only) ------------------------------
     def _check_symbol(self, claim):
         view = self.view
